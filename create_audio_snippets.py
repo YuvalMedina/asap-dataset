@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path   
 import math
 from music21 import *
+import copy
 
 def read_annotations(annotations_path):
     with open(annotations_path, 'r') as annotations_file:
@@ -18,29 +19,56 @@ def read_annotations(annotations_path):
                 line = next(annotations_file).split('\t')
             except StopIteration:
                 break
-            annotations.append([line[1], line[2]])
+            annotations.append([float(line[0]), line[2]])
         return annotations
     
-def make_snippets(audio_length, sr, snippets_length):
+def make_snippet_times(audio_length, sr, snippets_length):
     snippets_samples_length = sr * snippets_length
     quotient, remainder = divmod(audio_length, snippets_samples_length)
     if quotient == 0:
-        return [[0, audio_length]]
+        return [[0, int(audio_length)]]
     if remainder > snippets_samples_length * 0.7:
-        return [[i*snippets_samples_length, i*snippets_samples_length+snippets_samples_length] for i in len(quotient)] + [quotient*snippets_samples_length, quotient*snippets_samples_length+remainder]
-    return [[i*audio_length/(quotient+1), (i+1)*audio_length/(quotient+1)] for i in range(quotient+1)]
+        return [[int(i*snippets_samples_length), int(i*snippets_samples_length+snippets_samples_length)] for i in range(int(quotient))] + [[int(quotient*snippets_samples_length), int(quotient*snippets_samples_length+remainder)]]
+    return [[int(i*audio_length/(quotient+1)), int((i+1)*audio_length/(quotient+1))] for i in range(int(quotient)+1)]
 
-def make_snippets_annotations(annotations, snippets):
+def make_snippets_annotations(annotations, sr, snippet_times):
     snippets_annotations = []
-    for snippet in snippets:
-        start = snippet[0]
-        end = snippet[1]
+    for snippet_duration in snippet_times:
+        start = float(snippet_duration[0]) / sr
+        end = float(snippet_duration[1]) / sr
         snippets_annotations.append([annotation for annotation in annotations if annotation[0] >= start and annotation[0] < end])
     return snippets_annotations
+
+def delete_first_beats(xml_score, start_measure, start_beat):
+    xml_score = copy.deepcopy(xml_score)
+    start_offset = start_beat - 1
+    for measure in xml_score.recurse(classFilter=('Measure')):
+        if measure.number == start_measure:
+            removed = set()
+            for note_or_rest in measure.recurse(classFilter=('Note', 'Rest')):
+                if note_or_rest.offset < start_offset:
+                    removed.add(note_or_rest.activeSite)
+                    note_or_rest.activeSite.remove(note_or_rest)
+            for stream in removed: stream.insert(0, note.Rest())
+    return xml_score
+
+def delete_last_beats(xml_score, end_measure, end_beat):
+    xml_score = copy.deepcopy(xml_score)
+    end_offset = end_beat - 1
+    for measure in xml_score.recurse(classFilter=('Measure')):
+        if measure.number == end_measure:
+            removed = set()
+            for note_or_rest in measure.recurse(classFilter=('Note', 'Rest')):
+                if note_or_rest.offset > end_offset:
+                    removed.add(note_or_rest.activeSite)
+                    note_or_rest.activeSite.remove(note_or_rest)
+            for stream in removed: stream.insert(end_beat, note.Rest())
+    return xml_score
 
 def make_snippet_xml(xml_score, snippets_annotations, snippets_annotations_index, snippet_start, snippet_end, sr):
     snippet_start = snippet_start / sr
     snippet_end = snippet_end / sr
+    xml_score = copy.deepcopy(xml_score)
 
     start_measure = 1
     start_measure_timestamp = 0
@@ -61,28 +89,38 @@ def make_snippet_xml(xml_score, snippets_annotations, snippets_annotations_index
     
     end_measure = start_measure
     end_measure_timestamp = start_measure_timestamp
+    end_beat = None
     for annotation in snippets_annotations[snippets_annotations_index][1:]:
         if annotation[1].startswith('db'):
             end_measure += 1
             end_measure_timestamp = annotation[1]
+            end_beat = 1
+        else:
+            if end_beat: end_beat += 1
+            else: end_beat = 1
+
     xml_score = xml_score.measures(start_measure, end_measure)
-    if abs(start_measure_timestamp - snippet_start) > 0.01:
-        xml_score
+    if start_beat > 1:
+        xml_score = delete_first_beats(xml_score, start_measure, start_beat)
+    if end_beat:
+        xml_score = delete_last_beats(xml_score, end_measure, end_beat)
+    return xml_score
 
 def make_snippets(output_folder_path, in_audio_path, in_xml_path, in_annotations_path, snippets_length, padding=0.5):
     annotations = read_annotations(in_annotations_path)
     xml_score = converter.parse(in_xml_path)
     audio_data, sr = librosa.core.load(in_audio_path, sr=None, mono=False)
-    snippets, snippets_annotations = make_snippets(len(audio_data), annotations, sr, snippets_length)
-    for i in range(len(snippets)):
-        snippet = snippets[i]
-        file_name = '_'.join(in_audio_path[:-4].split('/') + i)
-        out_audio_path = Path.joinpath(output_folder_path, file_name + '.wav')
-        start = snippet[0]
-        end = snippet[1]
-        librosa.output.write_wav(out_audio_path, y=audio_data[start:end].astype(np.float32), sr=sr, mono=False)
+    snippet_times = make_snippet_times(audio_data.shape[1], sr, snippets_length)
+    snippets_annotations = make_snippets_annotations(annotations, sr, snippet_times)
+    for i in range(len(snippet_times)):
+        snippet_start_end = snippet_times[i]
+        file_name = '_'.join(in_audio_path[:-4].split('/') + [str(i)])
+        out_audio_path = Path(output_folder_path, file_name + '.wav')
+        start = snippet_start_end[0]
+        end = snippet_start_end[1]
+        librosa.output.write_wav(out_audio_path, y=audio_data[:, start:end].astype(np.float32), sr=sr, norm=False)
 
-        out_xml_path = Path.joinpath(output_folder_path, file_name + '.musicxml')
+        out_xml_path = Path(output_folder_path, file_name + '.musicxml')
         snippet_xml = make_snippet_xml(xml_score, snippets_annotations, i, start, end, sr)
         snippet_xml.write('musicxml', out_xml_path)
 
@@ -91,7 +129,7 @@ if __name__ == '__main__':
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     parser.add_argument('-l', '--snippets_length', help='The length of the snippets in seconds.',
-                        default=12.8, type=float)
+                        default=25.6, type=float)
         
     parser.add_argument('--metadata', help='The correspondence.csv metadata file.',
                         default='metadata.csv', type=pd.read_csv)
@@ -116,6 +154,5 @@ if __name__ == '__main__':
                 print("Failed for", idx,row["audio_performance"])
                 print(e)
             counter+=1
-        break
         if counter%20 == 0:
             print("{}/520 completed".format(counter))
