@@ -109,6 +109,7 @@ def make_snippet_xml(xml_score, snippets_annotations, snippets_annotations_index
 def make_snippets(output_folder_path, in_audio_path, in_xml_path, in_annotations_path, snippets_length, padding=0.5):
     annotations = read_annotations(in_annotations_path)
     xml_score = converter.parse(in_xml_path)
+    xml_score.metadata = None
     audio_data, sr = librosa.core.load(in_audio_path, sr=None, mono=False)
     snippet_times = make_snippet_times(audio_data.shape[1], sr, snippets_length)
     snippets_annotations = make_snippets_annotations(annotations, sr, snippet_times)
